@@ -1,26 +1,35 @@
 #!/usr/bin/env python
 
+import io
 import os
-import select
 import sys
 
 from probe import Probe
-from cPickle import dump, load
+from daemon import Daemon
+
 import Xlib
+
+
+# Configuration
+DAEMON_FIFO = '/tmp/prenestr.fifo'
+DAEMON_PID = '/tmp/prenestr.pid'
+DAEMON_LOG = '/tmp/prenestr.log'
 
 
 PROBE = Probe()
 
+
 def debug(msg):
-    if 'debug' in sys.argv:
-        print msg
+    with open(DAEMON_LOG, "a") as f:
+        f.write(msg + '\n')
 
 
-class X:
+class X(object):
 
     def __init__(self):
         self.wgap = 10
         self.hgap = 25
+        self.windows = {}
 
     def right(self, window=None, y_start=None, nb_win=1):
         self.move(True, window, y_start, nb_win)
@@ -68,12 +77,7 @@ class X:
 
     def restore(self):
         current_desktop = PROBE.get_desktop()
-        if not os.path.exists("/tmp/plwm.windows.%d" % current_desktop):
-            debug("Nothing to restore")
-            return
-        with open("/tmp/plwm.windows.%d" % current_desktop) as btile:
-            windows = load(btile)
-        for w in windows:
+        for w in self.windows[current_desktop]:
             if not w['hidden']:
                 try:
                     PROBE.window_resize(
@@ -84,7 +88,6 @@ class X:
                             int(w['height']))
                 except Xlib.error.BadWindow:
                     pass
-        os.remove("/tmp/plwm.windows.%d" % current_desktop)
 
     def tile(self):
         current_desktop = PROBE.get_desktop()
@@ -96,13 +99,11 @@ class X:
                 w for w in windows
                 if windows[w]['desktop'] == current_desktop
                 and w != self._id and not windows[w]['hidden']]
-        if not os.path.exists("/tmp/plwm.windows.%d" % current_desktop):
-            with open("/tmp/plwm.windows.%d" % current_desktop, "w") as btile:
-                dw = [windows[w].copy() for w in desk_windows]
-                for w in dw:
-                    # Can't dump xobj data
-                    del w['xobj']
-                dump(dw, btile)
+        dw = [windows[w].copy() for w in desk_windows]
+        for w in dw:
+            # Can't dump xobj data
+            del w['xobj']
+        self.windows[current_desktop] = dw
 
         # Remove ACTIVE
         nb_win = len(desk_windows)
@@ -136,34 +137,47 @@ class X:
                 int(self._active_w['width']),
                 int(current_desktop.get('height')))
 
-
     def quit(self):
         debug("Goodbye")
         exit(0)
 
 
-def init():
-    with open("/tmp/plwm.pid", "w") as fpid:
-        fpid.write(str(os.getpid()))
-    x = X()
-    fifoname = os.path.join('/tmp', 'plwm.fifo')
-    if os.path.exists(fifoname):
-        os.remove(fifoname)
-    try:
-        os.mkfifo(fifoname)
-    except OSError, e:
-        print "Failed to create FIFO: %s", e
-    else:
-        fifo = os.open(fifoname, os.O_RDONLY)
-        while True:
-            if select.select([fifo], [], []):
-                buf = os.read(fifo, 100)
-                if buf:
-                    command = buf.strip()
+class Prenestr(Daemon):
+
+    def run(self):
+        x = X()
+        if os.path.exists(DAEMON_FIFO):
+            os.remove(DAEMON_FIFO)
+        try:
+            os.mkfifo(DAEMON_FIFO)
+        except OSError, e:
+            sys.exit("Failed to create FIFO: %s", e)
+        else:
+            while True:
+                for line in io.open(DAEMON_FIFO):
+                    command = line.strip()
                     if hasattr(x, command):
                         getattr(x, command)()
                     else:
                         debug("%s command not found" % command)
+
+
+def init():
+    daemon = Prenestr("/tmp/prenestr.pid")
+    if len(sys.argv) == 2:
+        if 'start' == sys.argv[1]:
+            daemon.start()
+        elif 'stop' == sys.argv[1]:
+            daemon.stop()
+        elif 'restart' == sys.argv[1]:
+            daemon.restart()
+        else:
+            print "Unknown command"
+            sys.exit(2)
+        sys.exit(0)
+    else:
+        print "usage: %s start|stop|restart" % sys.argv[0]
+        sys.exit(2)
 
 
 if __name__ == '__main__':
