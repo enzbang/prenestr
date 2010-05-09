@@ -5,4 +5,4 @@ setup(name="prenestr",
       author="Olivier Ramonat",
       author_email="olivier@ramonat.fr",
       packages=["prenestr"],
-      scripts=["prenestr-send", "prenestr-daemon"])
+      scripts=["prenestr-daemon"])

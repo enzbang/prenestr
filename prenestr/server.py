@@ -1,162 +1,85 @@
-#!/usr/bin/env python
 
-import io
-import os
-import sys
+from Xlib.display import Display
+from Xlib import X
+from Xlib import protocol
 
-from probe import Probe
-from daemon import Daemon
-
-import Xlib
+K_G = 30
+K_H = 44
+K_L = 33
 
 
-# Configuration
-DAEMON_FIFO = '/tmp/prenestr.fifo'
-DAEMON_PID = '/tmp/prenestr.pid'
-DAEMON_LOG = '/tmp/prenestr.log'
+class Prenestr(object):
 
-
-PROBE = Probe()
-
-
-def debug(msg):
-    with open(DAEMON_LOG, "a") as f:
-        f.write(msg + '\n')
-
-
-class X(object):
 
     def __init__(self):
-        self.wgap = 10
-        self.hgap = 25
-        self.windows = {}
+        self.disp = Display()
+        self.root = self.disp.screen().root
 
-    def right(self, window=None, y_start=None, nb_win=1):
-        self.move(True, window, y_start, nb_win)
+        # we tell the X server we want to catch keyPress event
+        self.root.change_attributes(event_mask=X.KeyPressMask)
 
-    def left(self, window=None, y_start=None, nb_win=1):
-        self.move(False, window, y_start, nb_win)
+        active = self.get_active()
+        self.move(active)
+
+        self.grab_key(K_L)
+        self.grab_key(K_H)
+        while True:
+            event = self.root.display.next_event()
+            if event.type == X.KeyPress:
+                self.keypress(event)
+
 
     def get_active(self):
-        self._id = str(PROBE.get_active_window_id())
-        self._active_w = PROBE.get_window_by_id(long(self._id, 16))
-        self._active = self._active_w['xobj']
+        id = self.root.get_full_property(
+            self.disp.intern_atom("_NET_ACTIVE_WINDOW"), 0).value[0]
+        obj = self.disp.create_resource_object('window', id)
+        return (id, obj)
 
-    def move(self, right, window, y_start, nb_win):
-        current_desktop = PROBE.get_desktops()[PROBE.get_desktop()]
-        if window is None:
-            self.get_active()
-            window = self._active
-        if y_start is None:
-            y_start = current_desktop.get('y')
-        else:
-            if y_start:
-                y_start = (
-                        current_desktop.get('height')
-                        / nb_win) * y_start + self.hgap
-            else:
-                y_start = 0
+    def _send_event(self, win, ctype, data, mask=None):
+        data = (data + ([0] * (5 - len(data))))[:5]
+        ev = protocol.event.ClientMessage(window=win, client_type=ctype, data=(32, (data)))
+        self.root.send_event(ev, event_mask=X.SubstructureRedirectMask)
 
-        if right:
-            x_start = current_desktop.get('width') / 2 + self.wgap
-        else:
-            x_start = 0
-        debug("move %s %s y_start: %d (/%d)" % (
-            window or "CURRENT",
-            right and "Right" or "Left",
-            y_start,
-            nb_win))
-        PROBE.window_resize(
-                window,
-                x_start,
-                y_start,
-                current_desktop.get('width') / 2 - self.wgap,
-                current_desktop.get('height') / nb_win - self.hgap)
-        if window is None:
-            PROBE.window_activate(self._active)
+    def move(self, win, to='left'):
+        id, obj = win
+        root_geo = self.root.get_geometry()
 
-    def restore(self):
-        current_desktop = PROBE.get_desktop()
-        for w in self.windows[current_desktop]:
-            if not w['hidden']:
-                try:
-                    PROBE.window_resize(
-                            PROBE.get_window_by_id(long(w['id'], 16))['xobj'],
-                            int(w['x']),
-                            int(w['y']),
-                            int(w['width']),
-                            int(w['height']))
-                except Xlib.error.BadWindow:
-                    pass
+        if to == 'left':
+            x = root_geo.x
+            y = root_geo.y
+            w = root_geo.width / 2 - 10 # 10 border
+            h = root_geo.height
+        elif to == 'right':
+            x = root_geo.x + root_geo.width / 2 + 10
+            y = root_geo.y
+            w = root_geo.width / 2 - 10 # 10 border
+            h = root_geo.height
 
-    def tile(self):
-        current_desktop = PROBE.get_desktop()
-        # Active on left
-        self.get_active()
-        self.left()
-        windows = PROBE.get_windows()
-        desk_windows = [
-                w for w in windows
-                if windows[w]['desktop'] == current_desktop
-                and w != self._id and not windows[w]['hidden']]
-        dw = [windows[w].copy() for w in desk_windows]
-        for w in dw:
-            # Can't dump xobj data
-            del w['xobj']
-        self.windows[current_desktop] = dw
+        # Reset state
+        self._send_event(id,
+                self.disp.intern_atom("_NET_WM_STATE"),
+                [0, self.disp.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT"),
+                    self.disp.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")])
+        obj.configure(x=x, y=y, width=w, height=h, stack_mode=X.Above)
+        #self.disp.flush()
 
-        # Remove ACTIVE
-        nb_win = len(desk_windows)
-        debug("%d windows" % nb_win)
-        for pos, w in enumerate(desk_windows):
-            self.right(windows[w]['xobj'], pos, nb_win)
-        PROBE.window_activate(self._active)
+        self._send_event(id,
+                self.disp.intern_atom("_NET_ACTIVE_WINDOW"), [])
+        self.disp.flush()
 
-    def max_all(self):
-        current_desktop = PROBE.get_desktop()
-        # Active on left
-        self.get_active()
-        self.left()
-        windows = PROBE.get_windows()
-        desk_windows = [
-                w for w in windows
-                if windows[w]['desktop'] == current_desktop]
-        # Remove ACTIVE
-        for pos, w in enumerate(desk_windows):
-            PROBE.window_maximize(windows[w]['xobj'])
-        PROBE.window_activate(self._active)
+    def grab_key(self, key, mask=X.Mod4Mask, ungrab=False):
+        self.root.grab_key(key, mask, 1, X.GrabModeAsync, X.GrabModeAsync)
+        if ungrab:
+            self.ungrab_list.append(key)
 
-    def max_vert(self):
-        current_desktop = PROBE.get_desktops()[PROBE.get_desktop()]
+    def ungrab_key(self, key, mask=X.Mod4Mask):
+        self.root.ungrab_key(key, mask, 1)
 
-        self.get_active()
-        PROBE.window_resize(
-                self._active,
-                int(self._active_w['x']),
-                current_desktop.get('y'),
-                int(self._active_w['width']),
-                int(current_desktop.get('height')))
+    def keypress(self, event):
+        if event.detail == K_H:
+            self.move(self.get_active())
+        elif event.detail == K_L:
+            self.move(self.get_active(), to='right')
 
-    def quit(self):
-        debug("Goodbye")
-        exit(0)
-
-
-class Prenestr(Daemon):
-
-    def run(self):
-        x = X()
-        if os.path.exists(DAEMON_FIFO):
-            os.remove(DAEMON_FIFO)
-        try:
-            os.mkfifo(DAEMON_FIFO)
-        except OSError, e:
-            sys.exit("Failed to create FIFO: %s", e)
-        else:
-            while True:
-                for line in io.open(DAEMON_FIFO):
-                    command = line.strip()
-                    if hasattr(x, command):
-                        getattr(x, command)()
-                    else:
-                        debug("%s command not found" % command)
+if __name__ == '__main__':
+    Prenestr()
