@@ -99,6 +99,32 @@ class Prenestr(object):
             windesk = obj.get_full_property(
                 self.disp.intern_atom("_NET_WM_DESKTOP"), 0).value[0]
             if windesk == current_desktop:
+                # This window is on the current desktop
+
+                # Skip if transient
+                transient = obj.get_wm_transient_for()
+                if transient and transient != self.root:
+                    continue
+
+                # Skip if hidden
+                state = obj.get_full_property(
+                    self.disp.intern_atom("_NET_WM_STATE"), Xatom.ATOM)
+                dock = obj.get_full_property(
+                    self.disp.intern_atom("_NET_WM_WINDOW_TYPE"), Xatom.ATOM)
+
+                if (state and self.disp.intern_atom("_NET_WM_STATE_HIDDEN") in state.value
+                    or self.disp.intern_atom("_NET_WM_STATE_SKIP_TASKBAR") in state.value
+                    or self.disp.intern_atom("_NET_WM_STATE_SKIP_PAGER") in state.value):
+                    # hidden
+                    continue
+                if (dock and self.disp.intern_atom("_NET_WM_WINDOW_TYPE_DOCK") in dock.value
+                    and self.disp.intern_atom("_NET_WM_WINDOW_TYPE_TOOLBAR") in dock.value
+                    and self.disp.intern_atom("_NET_WM_WINDOW_TYPE_MENU") in dock.value
+                    and self.disp.intern_atom("_NET_ACTIVE_WINDOW_TYPE_SPLASH") in dock.value
+                    and self.disp.intern_atom("_NET_ACTIVE_WINDOW_TYPE_DIALOG") in dock.value):
+                    # hidden
+                    continue
+
                 desk_list.append((win_id, obj))
 
         if not desk_list:
